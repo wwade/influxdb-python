@@ -8,7 +8,7 @@ from warnings import warn
 import six
 
 
-class SeriesHelper(object):
+class SeriesHelper:
 
     """
     Subclassing this helper eases writing data points in bulk.
