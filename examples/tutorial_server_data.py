@@ -1,11 +1,15 @@
+# -*- coding: utf-8 -*-
+"""Tutorial on using the server functions."""
+
+from __future__ import print_function
 import argparse
 
-from influxdb import InfluxDBClient
-from influxdb.client import InfluxDBClientError
 import datetime
 import random
 import time
 
+from influxdb import InfluxDBClient
+from influxdb.client import InfluxDBClientError
 
 USER = 'root'
 PASSWORD = 'root'
@@ -13,7 +17,7 @@ DBNAME = 'tutorial'
 
 
 def main(host='localhost', port=8086, nb_day=15):
-
+    """Instantiate a connection to the backend."""
     nb_day = 15  # number of day to generate time series
     timeinterval_min = 5  # create an event every x minutes
     total_minutes = 1440 * nb_day
@@ -28,17 +32,18 @@ def main(host='localhost', port=8086, nb_day=15):
         hostName = "server-%d" % random.randint(1, 5)
         # pointValues = [int(past_date.strftime('%s')), value, hostName]
         pointValues = {
-                "time": int(past_date.strftime('%s')),
-                "measurement": metric,
-                'fields':  {
-                    'value': value,
-                },
-                'tags': {
-                    "hostName": hostName,
-                },
-            }
+            "time": int(past_date.strftime('%s')),
+            "measurement": metric,
+            "fields": {
+                "value": value,
+            },
+            "tags": {
+                "hostName": hostName,
+            },
+        }
         series.append(pointValues)
-    print series
+
+    print(series)
 
     client = InfluxDBClient(host, port, USER, PASSWORD, DBNAME)
 
@@ -51,7 +56,7 @@ def main(host='localhost', port=8086, nb_day=15):
         client.create_database(DBNAME)
 
     print("Create a retention policy")
-    retention_policy = 'awesome_policy'
+    retention_policy = 'server_data'
     client.create_retention_policy(retention_policy, '3d', 3, default=True)
 
     print("Write points #: {0}".format(total_records))
@@ -59,19 +64,22 @@ def main(host='localhost', port=8086, nb_day=15):
 
     time.sleep(2)
 
-    query = "SELECT MEAN(value) FROM %s WHERE time > now() - 10d GROUP BY time(500m)" % (metric)
-    result = client.query(query, database=DBNAME, raw=False)
-    print (result)
+    query = "SELECT MEAN(value) FROM {} WHERE \
+            time > now() - 10d GROUP BY time(500m)".format(metric)
+    result = client.query(query, database=DBNAME)
+    print(result)
     print("Result: {0}".format(result))
 
-    print("Drop database: " + DBNAME)
+    print("Drop database: {}".format(DBNAME))
     client.drop_database(DBNAME)
 
 
 def parse_args():
+    """Parse the args."""
     parser = argparse.ArgumentParser(
         description='example code to play with InfluxDB')
-    parser.add_argument('--host', type=str, required=False, default='localhost',
+    parser.add_argument('--host', type=str, required=False,
+                        default='localhost',
                         help='hostname influxdb http API')
     parser.add_argument('--port', type=int, required=False, default=8086,
                         help='port influxdb http API')

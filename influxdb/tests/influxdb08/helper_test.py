@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+"""Define set of helper functions for the dataframe."""
 
 import unittest
 import warnings
@@ -9,9 +10,11 @@ from requests.exceptions import ConnectionError
 
 
 class TestSeriesHelper(unittest.TestCase):
+    """Define the SeriesHelper for test."""
 
     @classmethod
     def setUpClass(cls):
+        """Set up an instance of the TestSerisHelper object."""
         super(TestSeriesHelper, cls).setUpClass()
 
         TestSeriesHelper.client = InfluxDBClient(
@@ -23,8 +26,11 @@ class TestSeriesHelper(unittest.TestCase):
         )
 
         class MySeriesHelper(SeriesHelper):
+            """Define a subset SeriesHelper instance."""
 
             class Meta:
+                """Define metadata for the TestSeriesHelper object."""
+
                 client = TestSeriesHelper.client
                 series_name = 'events.stats.{server_name}'
                 fields = ['time', 'server_name']
@@ -34,12 +40,13 @@ class TestSeriesHelper(unittest.TestCase):
         TestSeriesHelper.MySeriesHelper = MySeriesHelper
 
     def test_auto_commit(self):
-        """
-        Tests that write_points is called after the right number of events
-        """
+        """Test that write_points called after the right number of events."""
         class AutoCommitTest(SeriesHelper):
+            """Define an instance of SeriesHelper for AutoCommit test."""
 
             class Meta:
+                """Define metadata AutoCommitTest object."""
+
                 series_name = 'events.stats.{server_name}'
                 fields = ['time', 'server_name']
                 bulk_size = 5
@@ -57,9 +64,7 @@ class TestSeriesHelper(unittest.TestCase):
         self.assertTrue(fake_write_points.called)
 
     def testSingleSeriesName(self):
-        """
-        Tests JSON conversion when there is only one series name.
-        """
+        """Test JSON conversion when there is only one series name."""
         TestSeriesHelper.MySeriesHelper(server_name='us.east-1', time=159)
         TestSeriesHelper.MySeriesHelper(server_name='us.east-1', time=158)
         TestSeriesHelper.MySeriesHelper(server_name='us.east-1', time=157)
@@ -75,7 +80,7 @@ class TestSeriesHelper(unittest.TestCase):
         self.assertTrue(all([el in expectation for el in rcvd]) and
                         all([el in rcvd for el in expectation]),
                         'Invalid JSON body of time series returned from '
-                        '_json_body_ for one series name: {}.'.format(rcvd))
+                        '_json_body_ for one series name: {0}.'.format(rcvd))
         TestSeriesHelper.MySeriesHelper._reset_()
         self.assertEqual(
             TestSeriesHelper.MySeriesHelper._json_body_(),
@@ -83,9 +88,7 @@ class TestSeriesHelper(unittest.TestCase):
             'Resetting helper did not empty datapoints.')
 
     def testSeveralSeriesNames(self):
-        '''
-        Tests JSON conversion when there is only one series name.
-        '''
+        """Test JSON conversion when there is only one series name."""
         TestSeriesHelper.MySeriesHelper(server_name='us.east-1', time=159)
         TestSeriesHelper.MySeriesHelper(server_name='fr.paris-10', time=158)
         TestSeriesHelper.MySeriesHelper(server_name='lu.lux', time=157)
@@ -107,7 +110,7 @@ class TestSeriesHelper(unittest.TestCase):
         self.assertTrue(all([el in expectation for el in rcvd]) and
                         all([el in rcvd for el in expectation]),
                         'Invalid JSON body of time series returned from '
-                        '_json_body_ for several series names: {}.'
+                        '_json_body_ for several series names: {0}.'
                         .format(rcvd))
         TestSeriesHelper.MySeriesHelper._reset_()
         self.assertEqual(
@@ -116,27 +119,36 @@ class TestSeriesHelper(unittest.TestCase):
             'Resetting helper did not empty datapoints.')
 
     def testInvalidHelpers(self):
-        '''
-        Tests errors in invalid helpers.
-        '''
+        """Test errors in invalid helpers."""
         class MissingMeta(SeriesHelper):
+            """Define SeriesHelper object for MissingMeta test."""
+
             pass
 
         class MissingClient(SeriesHelper):
+            """Define SeriesHelper object for MissingClient test."""
 
             class Meta:
+                """Define metadata for MissingClient object."""
+
                 series_name = 'events.stats.{server_name}'
                 fields = ['time', 'server_name']
                 autocommit = True
 
         class MissingSeriesName(SeriesHelper):
+            """Define SeriesHelper object for MissingSeries test."""
 
             class Meta:
+                """Define metadata for MissingSeriesName object."""
+
                 fields = ['time', 'server_name']
 
         class MissingFields(SeriesHelper):
+            """Define SeriesHelper for MissingFields test."""
 
             class Meta:
+                """Define metadata for MissingFields object."""
+
                 series_name = 'events.stats.{server_name}'
 
         for cls in [MissingMeta, MissingClient, MissingFields,
@@ -146,12 +158,13 @@ class TestSeriesHelper(unittest.TestCase):
                                         'server_name': 'us.east-1'})
 
     def testWarnBulkSizeZero(self):
-        """
-        Tests warning for an invalid bulk size.
-        """
+        """Test warning for an invalid bulk size."""
         class WarnBulkSizeZero(SeriesHelper):
+            """Define SeriesHelper for WarnBulkSizeZero test."""
 
             class Meta:
+                """Define metadata for WarnBulkSizeZero object."""
+
                 client = TestSeriesHelper.client
                 series_name = 'events.stats.{server_name}'
                 fields = ['time', 'server_name']
@@ -167,8 +180,8 @@ class TestSeriesHelper(unittest.TestCase):
 
         self.assertGreaterEqual(
             len(rec_warnings), 1,
-            '{} call should have generated one warning.'
-            'Actual generated warnings: {}'.format(
+            '{0} call should have generated one warning.'
+            'Actual generated warnings: {1}'.format(
                 WarnBulkSizeZero, '\n'.join(map(str, rec_warnings))))
 
         expected_msg = (
@@ -180,12 +193,13 @@ class TestSeriesHelper(unittest.TestCase):
                       'Warning message did not contain "forced to 1".')
 
     def testWarnBulkSizeNoEffect(self):
-        """
-        Tests warning for a set bulk size but autocommit False.
-        """
+        """Test warning for a set bulk size but autocommit False."""
         class WarnBulkSizeNoEffect(SeriesHelper):
+            """Define SeriesHelper for WarnBulkSizeNoEffect object."""
 
             class Meta:
+                """Define metadata for WarnBulkSizeNoEffect object."""
+
                 series_name = 'events.stats.{server_name}'
                 fields = ['time', 'server_name']
                 bulk_size = 5
@@ -197,8 +211,8 @@ class TestSeriesHelper(unittest.TestCase):
 
         self.assertGreaterEqual(
             len(rec_warnings), 1,
-            '{} call should have generated one warning.'
-            'Actual generated warnings: {}'.format(
+            '{0} call should have generated one warning.'
+            'Actual generated warnings: {1}'.format(
                 WarnBulkSizeNoEffect, '\n'.join(map(str, rec_warnings))))
 
         expected_msg = (

@@ -1,17 +1,23 @@
 # -*- coding: utf-8 -*-
+"""Module to generate chunked JSON replies for influxdb08."""
 
 #
 # Author: Adrian Sampson <adrian@radbox.org>
 # Source: https://gist.github.com/sampsyo/920215
 #
 
-import json
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
 
-_decoder = json.JSONDecoder()
+import json
 
 
 def loads(s):
-    """A generator reading a sequence of JSON values from a string."""
+    """Generate a sequence of JSON values from a string."""
+    _decoder = json.JSONDecoder()
+
     while s:
         s = s.strip()
         obj, pos = _decoder.raw_decode(s)

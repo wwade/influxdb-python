@@ -1,36 +1,31 @@
 # -*- coding: utf-8 -*-
-"""
-Python client for InfluxDB
-"""
+"""Python client for InfluxDB."""
 
-from functools import wraps
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
+
+import time
+import random
+
 import json
 import socket
-import time
-import threading
-import random
 import requests
 import requests.exceptions
-from sys import version_info
+from six.moves import xrange
+from six.moves.urllib.parse import urlparse
 
-from influxdb.line_protocol import make_lines
+from influxdb.line_protocol import make_lines, quote_ident, quote_literal
 from influxdb.resultset import ResultSet
 from .exceptions import InfluxDBClientError
 from .exceptions import InfluxDBServerError
 
-try:
-    xrange
-except NameError:
-    xrange = range
-
-if version_info[0] == 3:
-    from urllib.parse import urlparse
-else:
-    from urlparse import urlparse
-
 
 class InfluxDBClient(object):
-    """The :class:`~.InfluxDBClient` object holds information necessary to
+    """InfluxDBClient primary client object to connect InfluxDB.
+
+    The :class:`~.InfluxDBClient` object holds information necessary to
     connect to InfluxDB. Requests can be made to InfluxDB directly through
     the client.
 
@@ -42,6 +37,8 @@ class InfluxDBClient(object):
     :type username: str
     :param password: password of the user, defaults to 'root'
     :type password: str
+    :param pool_size: urllib3 connection pool size, defaults to 10.
+    :type pool_size: int
     :param database: database name to connect to, defaults to None
     :type database: str
     :param ssl: use https instead of http to connect to InfluxDB, defaults to
@@ -53,8 +50,11 @@ class InfluxDBClient(object):
     :param timeout: number of seconds Requests will wait for your client to
         establish a connection, defaults to None
     :type timeout: int
+    :param retries: number of retries your client will try before aborting,
+        defaults to 3. 0 indicates try until success
+    :type retries: int
     :param use_udp: use UDP to connect to InfluxDB, defaults to False
-    :type use_udp: int
+    :type use_udp: bool
     :param udp_port: UDP port to connect to InfluxDB, defaults to 4444
     :type udp_port: int
     :param proxies: HTTP(S) proxy to use for Requests, defaults to {}
@@ -70,23 +70,31 @@ class InfluxDBClient(object):
                  ssl=False,
                  verify_ssl=False,
                  timeout=None,
+                 retries=3,
                  use_udp=False,
                  udp_port=4444,
                  proxies=None,
+                 pool_size=10,
                  ):
         """Construct a new InfluxDBClient object."""
         self.__host = host
-        self._port = port
+        self.__port = int(port)
         self._username = username
         self._password = password
         self._database = database
         self._timeout = timeout
+        self._retries = retries
 
         self._verify_ssl = verify_ssl
 
-        self.use_udp = use_udp
-        self.udp_port = udp_port
+        self.__use_udp = use_udp
+        self.__udp_port = udp_port
         self._session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=int(pool_size),
+            pool_maxsize=int(pool_size)
+        )
+
         if use_udp:
             self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
@@ -94,6 +102,8 @@ class InfluxDBClient(object):
 
         if ssl is True:
             self._scheme = "https"
+
+        self._session.mount(self._scheme, adapter)
 
         if proxies is None:
             self._proxies = {}
@@ -106,29 +116,35 @@ class InfluxDBClient(object):
             self._port)
 
         self._headers = {
-            'Content-type': 'application/json',
+            'Content-Type': 'application/json',
             'Accept': 'text/plain'
         }
 
-    # _baseurl and _host are properties to allow InfluxDBClusterClient
-    # to override them with thread-local variables
     @property
     def _baseurl(self):
-        return self._get_baseurl()
-
-    def _get_baseurl(self):
         return self.__baseurl
 
     @property
     def _host(self):
-        return self._get_host()
-
-    def _get_host(self):
         return self.__host
 
-    @staticmethod
-    def from_DSN(dsn, **kwargs):
-        """Return an instance of :class:`~.InfluxDBClient` from the provided
+    @property
+    def _port(self):
+        return self.__port
+
+    @property
+    def _udp_port(self):
+        return self.__udp_port
+
+    @property
+    def _use_udp(self):
+        return self.__use_udp
+
+    @classmethod
+    def from_dsn(cls, dsn, **kwargs):
+        r"""Generate an instance of InfluxDBClient from given data source name.
+
+        Return an instance of :class:`~.InfluxDBClient` from the provided
         data source name. Supported schemes are "influxdb", "https+influxdb"
         and "udp+influxdb". Parameters for the :class:`~.InfluxDBClient`
         constructor may also be passed to this method.
@@ -143,12 +159,12 @@ class InfluxDBClient(object):
 
         ::
 
-            >> cli = InfluxDBClient.from_DSN('influxdb://username:password@\
-localhost:8086/databasename', timeout=5)
+            >> cli = InfluxDBClient.from_dsn('influxdb://username:password@\
+            localhost:8086/databasename', timeout=5)
             >> type(cli)
             <class 'influxdb.client.InfluxDBClient'>
-            >> cli = InfluxDBClient.from_DSN('udp+influxdb://username:pass@\
-localhost:8086/databasename', timeout=5, udp_port=159)
+            >> cli = InfluxDBClient.from_dsn('udp+influxdb://username:pass@\
+            localhost:8086/databasename', timeout=5, udp_port=159)
             >> print('{0._baseurl} - {0.use_udp} {0.udp_port}'.format(cli))
             http://localhost:8086 - True 159
 
@@ -157,14 +173,13 @@ localhost:8086/databasename', timeout=5, udp_port=159)
             be used for the TCP connection; specify the UDP port with the
             additional `udp_port` parameter (cf. examples).
         """
-
-        init_args = parse_dsn(dsn)
+        init_args = _parse_dsn(dsn)
         host, port = init_args.pop('hosts')[0]
         init_args['host'] = host
         init_args['port'] = port
         init_args.update(kwargs)
 
-        return InfluxDBClient(**init_args)
+        return cls(**init_args)
 
     def switch_database(self, database):
         """Change the client's database.
@@ -200,6 +215,8 @@ localhost:8086/databasename', timeout=5, udp_port=159)
         :param expected_response_code: the expected response code of
             the request, defaults to 200
         :type expected_response_code: int
+        :param headers: headers to add to the request
+        :type headers: dict
         :returns: the response from the request
         :rtype: :class:`requests.Response`
         :raises InfluxDBServerError: if the response code is any server error
@@ -218,9 +235,10 @@ localhost:8086/databasename', timeout=5, udp_port=159)
         if isinstance(data, (dict, list)):
             data = json.dumps(data)
 
-        # Try to send the request a maximum of three times. (see #103)
-        # TODO (aviau): Make this configurable.
-        for i in range(0, 3):
+        # Try to send the request more than once by default (see #103)
+        retry = True
+        _try = 0
+        while retry:
             try:
                 response = self._session.request(
                     method=method,
@@ -234,50 +252,80 @@ localhost:8086/databasename', timeout=5, udp_port=159)
                     timeout=self._timeout
                 )
                 break
-            except requests.exceptions.ConnectionError as e:
-                if i < 2:
-                    continue
-                else:
-                    raise e
-
-        if response.status_code >= 500 and response.status_code < 600:
+            except (requests.exceptions.ConnectionError,
+                    requests.exceptions.HTTPError,
+                    requests.exceptions.Timeout):
+                _try += 1
+                if self._retries != 0:
+                    retry = _try < self._retries
+                if method == "POST":
+                    time.sleep((2 ** _try) * random.random() / 100.0)
+                if not retry:
+                    raise
+        # if there's not an error, there must have been a successful response
+        if 500 <= response.status_code < 600:
             raise InfluxDBServerError(response.content)
         elif response.status_code == expected_response_code:
             return response
         else:
             raise InfluxDBClientError(response.content, response.status_code)
 
-    def write(self, data, params=None, expected_response_code=204):
+    def write(self, data, params=None, expected_response_code=204,
+              protocol='json'):
         """Write data to InfluxDB.
 
         :param data: the data to be written
-        :type data: dict
+        :type data: (if protocol is 'json') dict
+                    (if protocol is 'line') sequence of line protocol strings
+                                            or single string
         :param params: additional parameters for the request, defaults to None
         :type params: dict
         :param expected_response_code: the expected response code of the write
             operation, defaults to 204
         :type expected_response_code: int
+        :param protocol: protocol of input data, either 'json' or 'line'
+        :type protocol: str
         :returns: True, if the write operation is successful
         :rtype: bool
         """
-
         headers = self._headers
-        headers['Content-type'] = 'application/octet-stream'
+        headers['Content-Type'] = 'application/octet-stream'
 
         if params:
             precision = params.get('precision')
         else:
             precision = None
 
+        if protocol == 'json':
+            data = make_lines(data, precision).encode('utf-8')
+        elif protocol == 'line':
+            if isinstance(data, str):
+                data = [data]
+            data = ('\n'.join(data) + '\n').encode('utf-8')
+
         self.request(
             url="write",
             method='POST',
             params=params,
-            data=make_lines(data, precision).encode('utf-8'),
+            data=data,
             expected_response_code=expected_response_code,
             headers=headers
         )
         return True
+
+    @staticmethod
+    def _read_chunked_response(response, raise_errors=True):
+        result_set = {}
+        for line in response.iter_lines():
+            if isinstance(line, bytes):
+                line = line.decode('utf-8')
+            data = json.loads(line)
+            for result in data.get('results', []):
+                for _key in result:
+                    if isinstance(result[_key], list):
+                        result_set.setdefault(
+                            _key, []).extend(result[_key])
+        return ResultSet(result_set, raise_errors=raise_errors)
 
     def query(self,
               query,
@@ -285,14 +333,22 @@ localhost:8086/databasename', timeout=5, udp_port=159)
               epoch=None,
               expected_response_code=200,
               database=None,
-              raise_errors=True):
+              raise_errors=True,
+              chunked=False,
+              chunk_size=0):
         """Send a query to InfluxDB.
 
         :param query: the actual query string
         :type query: str
 
-        :param params: additional parameters for the request, defaults to {}
+        :param params: additional parameters for the request,
+            defaults to {}
         :type params: dict
+
+        :param epoch: response timestamps to be in epoch format either 'h',
+            'm', 's', 'ms', 'u', or 'ns',defaults to `None` which is
+            RFC3339 UTC format with nanosecond precision
+        :type epoch: str
 
         :param expected_response_code: the expected status code of response,
             defaults to 200
@@ -304,6 +360,14 @@ localhost:8086/databasename', timeout=5, udp_port=159)
         :param raise_errors: Whether or not to raise exceptions when InfluxDB
             returns errors, defaults to True
         :type raise_errors: bool
+
+        :param chunked: Enable to use chunked responses from InfluxDB.
+            With ``chunked`` enabled, one ResultSet is returned per chunk
+            containing all results within that chunk
+        :type chunked: bool
+
+        :param chunk_size: Size of each chunk to tell InfluxDB to use.
+        :type chunk_size: int
 
         :returns: the queried data
         :rtype: :class:`~.ResultSet`
@@ -317,6 +381,11 @@ localhost:8086/databasename', timeout=5, udp_port=159)
         if epoch is not None:
             params['epoch'] = epoch
 
+        if chunked:
+            params['chunked'] = 'true'
+            if chunk_size > 0:
+                params['chunk_size'] = chunk_size
+
         response = self.request(
             url="query",
             method='GET',
@@ -324,6 +393,9 @@ localhost:8086/databasename', timeout=5, udp_port=159)
             data=None,
             expected_response_code=expected_response_code
         )
+
+        if chunked:
+            return self._read_chunked_response(response)
 
         data = response.json()
 
@@ -336,8 +408,8 @@ localhost:8086/databasename', timeout=5, udp_port=159)
         # TODO(aviau): Always return a list. (This would be a breaking change)
         if len(results) == 1:
             return results[0]
-        else:
-            return results
+
+        return results
 
     def write_points(self,
                      points,
@@ -346,11 +418,15 @@ localhost:8086/databasename', timeout=5, udp_port=159)
                      retention_policy=None,
                      tags=None,
                      batch_size=None,
+                     protocol='json'
                      ):
         """Write to multiple time series names.
 
         :param points: the list of points to be written in the database
         :type points: list of dictionaries, each dictionary represents a point
+        :type points: (if protocol is 'json') list of dicts, where each dict
+                                            represents a point.
+                    (if protocol is 'line') sequence of line protocol strings.
         :param time_precision: Either 's', 'm', 'ms' or 'u', defaults to None
         :type time_precision: str
         :param database: the database to write the points to. Defaults to
@@ -368,29 +444,44 @@ localhost:8086/databasename', timeout=5, udp_port=159)
             one database to another or when doing a massive write operation,
             defaults to None
         :type batch_size: int
+        :param protocol: Protocol for writing data. Either 'line' or 'json'.
+        :type protocol: str
         :returns: True, if the operation is successful
         :rtype: bool
 
         .. note:: if no retention policy is specified, the default retention
             policy for the database is used
         """
-
         if batch_size and batch_size > 0:
             for batch in self._batches(points, batch_size):
                 self._write_points(points=batch,
                                    time_precision=time_precision,
                                    database=database,
                                    retention_policy=retention_policy,
-                                   tags=tags)
+                                   tags=tags, protocol=protocol)
             return True
-        else:
-            return self._write_points(points=points,
-                                      time_precision=time_precision,
-                                      database=database,
-                                      retention_policy=retention_policy,
-                                      tags=tags)
 
-    def _batches(self, iterable, size):
+        return self._write_points(points=points,
+                                  time_precision=time_precision,
+                                  database=database,
+                                  retention_policy=retention_policy,
+                                  tags=tags, protocol=protocol)
+
+    def ping(self):
+        """Check connectivity to InfluxDB.
+
+        :returns: The version of the InfluxDB the client is connected to
+        """
+        response = self.request(
+            url="ping",
+            method='GET',
+            expected_response_code=204
+        )
+
+        return response.headers['X-Influxdb-Version']
+
+    @staticmethod
+    def _batches(iterable, size):
         for i in xrange(0, len(iterable), size):
             yield iterable[i:i + size]
 
@@ -399,23 +490,27 @@ localhost:8086/databasename', timeout=5, udp_port=159)
                       time_precision,
                       database,
                       retention_policy,
-                      tags):
+                      tags,
+                      protocol='json'):
         if time_precision not in ['n', 'u', 'ms', 's', 'm', 'h', None]:
             raise ValueError(
                 "Invalid time precision is given. "
                 "(use 'n', 'u', 'ms', 's', 'm' or 'h')")
 
-        if self.use_udp and time_precision and time_precision != 's':
+        if self._use_udp and time_precision and time_precision != 's':
             raise ValueError(
                 "InfluxDB only supports seconds precision for udp writes"
             )
 
-        data = {
-            'points': points
-        }
+        if protocol == 'json':
+            data = {
+                'points': points
+            }
 
-        if tags is not None:
-            data['tags'] = tags
+            if tags is not None:
+                data['tags'] = tags
+        else:
+            data = points
 
         params = {
             'db': database or self._database
@@ -427,13 +522,14 @@ localhost:8086/databasename', timeout=5, udp_port=159)
         if retention_policy is not None:
             params['rp'] = retention_policy
 
-        if self.use_udp:
-            self.send_packet(data)
+        if self._use_udp:
+            self.send_packet(data, protocol=protocol)
         else:
             self.write(
                 data=data,
                 params=params,
-                expected_response_code=204
+                expected_response_code=204,
+                protocol=protocol
             )
 
         return True
@@ -460,7 +556,7 @@ localhost:8086/databasename', timeout=5, udp_port=159)
         :param dbname: the name of the database to create
         :type dbname: str
         """
-        self.query("CREATE DATABASE \"%s\"" % dbname)
+        self.query("CREATE DATABASE {0}".format(quote_ident(dbname)))
 
     def drop_database(self, dbname):
         """Drop a database from InfluxDB.
@@ -468,7 +564,33 @@ localhost:8086/databasename', timeout=5, udp_port=159)
         :param dbname: the name of the database to drop
         :type dbname: str
         """
-        self.query("DROP DATABASE \"%s\"" % dbname)
+        self.query("DROP DATABASE {0}".format(quote_ident(dbname)))
+
+    def get_list_measurements(self):
+        """Get the list of measurements in InfluxDB.
+
+        :returns: all measurements in InfluxDB
+        :rtype: list of dictionaries
+
+        :Example:
+
+        ::
+
+            >> dbs = client.get_list_measurements()
+            >> dbs
+            [{u'name': u'measurements1'},
+             {u'name': u'measurements2'},
+             {u'name': u'measurements3'}]
+        """
+        return list(self.query("SHOW MEASUREMENTS").get_points())
+
+    def drop_measurement(self, measurement):
+        """Drop a measurement from InfluxDB.
+
+        :param measurement: the name of the measurement to drop
+        :type measurement: str
+        """
+        self.query("DROP MEASUREMENT {0}".format(quote_ident(measurement)))
 
     def create_retention_policy(self, name, duration, replication,
                                 database=None, default=False):
@@ -479,8 +601,8 @@ localhost:8086/databasename', timeout=5, udp_port=159)
         :param duration: the duration of the new retention policy.
             Durations such as 1h, 90m, 12h, 7d, and 4w, are all supported
             and mean 1 hour, 90 minutes, 12 hours, 7 day, and 4 weeks,
-            respectively. For infinite retention – meaning the data will
-            never be deleted – use 'INF' for duration.
+            respectively. For infinite retention - meaning the data will
+            never be deleted - use 'INF' for duration.
             The minimum retention period is 1 hour.
         :type duration: str
         :param replication: the replication of the retention policy
@@ -492,9 +614,10 @@ localhost:8086/databasename', timeout=5, udp_port=159)
         :type default: bool
         """
         query_string = \
-            "CREATE RETENTION POLICY %s ON %s " \
-            "DURATION %s REPLICATION %s" % \
-            (name, database or self._database, duration, replication)
+            "CREATE RETENTION POLICY {0} ON {1} " \
+            "DURATION {2} REPLICATION {3}".format(
+                quote_ident(name), quote_ident(database or self._database),
+                duration, replication)
 
         if default is True:
             query_string += " DEFAULT"
@@ -513,13 +636,13 @@ localhost:8086/databasename', timeout=5, udp_port=159)
         :param duration: the new duration of the existing retention policy.
             Durations such as 1h, 90m, 12h, 7d, and 4w, are all supported
             and mean 1 hour, 90 minutes, 12 hours, 7 day, and 4 weeks,
-            respectively. For infinite retention – meaning the data will
-            never be deleted – use 'INF' for duration.
+            respectively. For infinite retention, meaning the data will
+            never be deleted, use 'INF' for duration.
             The minimum retention period is 1 hour.
         :type duration: str
         :param replication: the new replication of the existing
             retention policy
-        :type replication: str
+        :type replication: int
         :param default: whether or not to set the modified policy as default
         :type default: bool
 
@@ -527,15 +650,29 @@ localhost:8086/databasename', timeout=5, udp_port=159)
             should be set. Otherwise the operation will fail.
         """
         query_string = (
-            "ALTER RETENTION POLICY {} ON {}"
-        ).format(name, database or self._database)
+            "ALTER RETENTION POLICY {0} ON {1}"
+        ).format(quote_ident(name), quote_ident(database or self._database))
         if duration:
-            query_string += " DURATION {}".format(duration)
+            query_string += " DURATION {0}".format(duration)
         if replication:
-            query_string += " REPLICATION {}".format(replication)
+            query_string += " REPLICATION {0}".format(replication)
         if default is True:
             query_string += " DEFAULT"
 
+        self.query(query_string)
+
+    def drop_retention_policy(self, name, database=None):
+        """Drop an existing retention policy for a database.
+
+        :param name: the name of the retention policy to drop
+        :type name: str
+        :param database: the database for which the retention policy is
+            dropped. Defaults to current client's database
+        :type database: str
+        """
+        query_string = (
+            "DROP RETENTION POLICY {0} ON {1}"
+        ).format(quote_ident(name), quote_ident(database or self._database))
         self.query(query_string)
 
     def get_list_retention_policies(self, database=None):
@@ -557,40 +694,17 @@ localhost:8086/databasename', timeout=5, udp_port=159)
               u'duration': u'0',
               u'name': u'default',
               u'replicaN': 1}]
-            """
+        """
+        if not (database or self._database):
+            raise InfluxDBClientError(
+                "get_list_retention_policies() requires a database as a "
+                "parameter or the client to be using a database")
+
         rsp = self.query(
-            "SHOW RETENTION POLICIES ON %s" % (database or self._database)
+            "SHOW RETENTION POLICIES ON {0}".format(
+                quote_ident(database or self._database))
         )
         return list(rsp.get_points())
-
-    def get_list_series(self, database=None):
-        """Get the list of series for a database.
-
-        :param database: the name of the database, defaults to the client's
-            current database
-        :type database: str
-        :returns: all series in the specified database
-        :rtype: list of dictionaries
-
-        :Example:
-
-        >> series = client.get_list_series('my_database')
-        >> series
-        [{'name': u'cpu_usage',
-          'tags': [{u'_id': 1,
-                    u'host': u'server01',
-                    u'region': u'us-west'}]}]
-        """
-        rsp = self.query("SHOW SERIES", database=database)
-        series = []
-        for serie in rsp.items():
-            series.append(
-                {
-                    "name": serie[0][0],
-                    "tags": list(serie[1])
-                }
-            )
-        return series
 
     def get_list_users(self):
         """Get the list of all users in InfluxDB.
@@ -611,7 +725,7 @@ localhost:8086/databasename', timeout=5, udp_port=159)
         return list(self.query("SHOW USERS").get_points())
 
     def create_user(self, username, password, admin=False):
-        """Create a new user in InfluxDB
+        """Create a new user in InfluxDB.
 
         :param username: the new username to create
         :type username: str
@@ -621,18 +735,19 @@ localhost:8086/databasename', timeout=5, udp_port=159)
             privileges or not
         :type admin: boolean
         """
-        text = "CREATE USER {} WITH PASSWORD '{}'".format(username, password)
+        text = "CREATE USER {0} WITH PASSWORD {1}".format(
+            quote_ident(username), quote_literal(password))
         if admin:
             text += ' WITH ALL PRIVILEGES'
         self.query(text)
 
     def drop_user(self, username):
-        """Drop an user from InfluxDB.
+        """Drop a user from InfluxDB.
 
         :param username: the username to drop
         :type username: str
         """
-        text = "DROP USER {}".format(username)
+        text = "DROP USER {0}".format(quote_ident(username))
         self.query(text)
 
     def set_user_password(self, username, password):
@@ -643,33 +758,48 @@ localhost:8086/databasename', timeout=5, udp_port=159)
         :param password: the new password for the user
         :type password: str
         """
-        text = "SET PASSWORD FOR {} = '{}'".format(username, password)
+        text = "SET PASSWORD FOR {0} = {1}".format(
+            quote_ident(username), quote_literal(password))
         self.query(text)
 
     def delete_series(self, database=None, measurement=None, tags=None):
-        """Delete series from a database. Series can be filtered by
-        measurement and tags.
+        """Delete series from a database.
 
-        :param measurement: Delete all series from a measurement
-        :type id: string
-        :param tags: Delete all series that match given tags
-        :type id: dict
+        Series can be filtered by measurement and tags.
+
         :param database: the database from which the series should be
             deleted, defaults to client's current database
         :type database: str
+        :param measurement: Delete all series from a measurement
+        :type measurement: str
+        :param tags: Delete all series that match given tags
+        :type tags: dict
         """
         database = database or self._database
         query_str = 'DROP SERIES'
         if measurement:
-            query_str += ' FROM "{}"'.format(measurement)
+            query_str += ' FROM {0}'.format(quote_ident(measurement))
 
         if tags:
-            query_str += ' WHERE ' + ' and '.join(["{}='{}'".format(k, v)
-                                                   for k, v in tags.items()])
+            tag_eq_list = ["{0}={1}".format(quote_ident(k), quote_literal(v))
+                           for k, v in tags.items()]
+            query_str += ' WHERE ' + ' AND '.join(tag_eq_list)
         self.query(query_str, database=database)
 
+    def grant_admin_privileges(self, username):
+        """Grant cluster administration privileges to a user.
+
+        :param username: the username to grant privileges to
+        :type username: str
+
+        .. note:: Only a cluster administrator can create/drop databases
+            and manage users.
+        """
+        text = "GRANT ALL PRIVILEGES TO {0}".format(quote_ident(username))
+        self.query(text)
+
     def revoke_admin_privileges(self, username):
-        """Revoke cluster administration privileges from an user.
+        """Revoke cluster administration privileges from a user.
 
         :param username: the username to revoke privileges from
         :type username: str
@@ -677,11 +807,11 @@ localhost:8086/databasename', timeout=5, udp_port=159)
         .. note:: Only a cluster administrator can create/ drop databases
             and manage users.
         """
-        text = "REVOKE ALL PRIVILEGES FROM {}".format(username)
+        text = "REVOKE ALL PRIVILEGES FROM {0}".format(quote_ident(username))
         self.query(text)
 
     def grant_privilege(self, privilege, database, username):
-        """Grant a privilege on a database to an user.
+        """Grant a privilege on a database to a user.
 
         :param privilege: the privilege to grant, one of 'read', 'write'
             or 'all'. The string is case-insensitive
@@ -691,13 +821,13 @@ localhost:8086/databasename', timeout=5, udp_port=159)
         :param username: the username to grant the privilege to
         :type username: str
         """
-        text = "GRANT {} ON {} TO {}".format(privilege,
-                                             database,
-                                             username)
+        text = "GRANT {0} ON {1} TO {2}".format(privilege,
+                                                quote_ident(database),
+                                                quote_ident(username))
         self.query(text)
 
     def revoke_privilege(self, privilege, database, username):
-        """Revoke a privilege on a database from an user.
+        """Revoke a privilege on a database from a user.
 
         :param privilege: the privilege to revoke, one of 'read', 'write'
             or 'all'. The string is case-insensitive
@@ -707,178 +837,60 @@ localhost:8086/databasename', timeout=5, udp_port=159)
         :param username: the username to revoke the privilege from
         :type username: str
         """
-        text = "REVOKE {} ON {} FROM {}".format(privilege,
-                                                database,
-                                                username)
+        text = "REVOKE {0} ON {1} FROM {2}".format(privilege,
+                                                   quote_ident(database),
+                                                   quote_ident(username))
         self.query(text)
 
-    def send_packet(self, packet):
-        """Send an UDP packet.
+    def get_list_privileges(self, username):
+        """Get the list of all privileges granted to given user.
 
-        :param packet: the packet to be sent
-        :type packet: dict
-        """
-        data = make_lines(packet).encode('utf-8')
-        self.udp_socket.sendto(data, (self._host, self.udp_port))
+        :param username: the username to get privileges of
+        :type username: str
 
-
-class InfluxDBClusterClient(object):
-    """The :class:`~.InfluxDBClusterClient` is the client for connecting
-    to a cluster of InfluxDB servers. Each query hits different host from the
-    list of hosts.
-
-    :param hosts: all hosts to be included in the cluster, each of which
-        should be in the format (address, port),
-        e.g. [('127.0.0.1', 8086), ('127.0.0.1', 9096)]. Defaults to
-        [('localhost', 8086)]
-    :type hosts: list of tuples
-    :param shuffle: whether the queries should hit servers evenly(randomly),
-        defaults to True
-    :type shuffle: bool
-    :param client_base_class: the base class for the cluster client.
-        This parameter is used to enable the support of different client
-        types. Defaults to :class:`~.InfluxDBClient`
-    :param healing_delay: the delay in seconds, counting from last failure of
-        a server, before re-adding server to the list of working servers.
-        Defaults to 15 minutes (900 seconds)
-    """
-
-    def __init__(self,
-                 hosts=[('localhost', 8086)],
-                 username='root',
-                 password='root',
-                 database=None,
-                 ssl=False,
-                 verify_ssl=False,
-                 timeout=None,
-                 use_udp=False,
-                 udp_port=4444,
-                 shuffle=True,
-                 client_base_class=InfluxDBClient,
-                 healing_delay=900,
-                 ):
-        self.clients = [self]  # Keep it backwards compatible
-        self.hosts = hosts
-        self.bad_hosts = []   # Corresponding server has failures in history
-        self.shuffle = shuffle
-        self.healing_delay = healing_delay
-        self._last_healing = time.time()
-        host, port = self.hosts[0]
-        self._hosts_lock = threading.Lock()
-        self._thread_local = threading.local()
-        self._client = client_base_class(host=host,
-                                         port=port,
-                                         username=username,
-                                         password=password,
-                                         database=database,
-                                         ssl=ssl,
-                                         verify_ssl=verify_ssl,
-                                         timeout=timeout,
-                                         use_udp=use_udp,
-                                         udp_port=udp_port)
-        for method in dir(client_base_class):
-            orig_attr = getattr(client_base_class, method, '')
-            if method.startswith('_') or not callable(orig_attr):
-                continue
-
-            setattr(self, method, self._make_func(orig_attr))
-
-        self._client._get_host = self._get_host
-        self._client._get_baseurl = self._get_baseurl
-        self._update_client_host(self.hosts[0])
-
-    @staticmethod
-    def from_DSN(dsn, client_base_class=InfluxDBClient,
-                 shuffle=True, **kwargs):
-        """Same as :meth:`~.InfluxDBClient.from_DSN`, but supports
-        multiple servers.
-
-        :param shuffle: whether the queries should hit servers
-            evenly(randomly), defaults to True
-        :type shuffle: bool
-        :param client_base_class: the base class for all clients in the
-            cluster. This parameter is used to enable the support of
-            different client types. Defaults to :class:`~.InfluxDBClient`
+        :returns: all privileges granted to given user
+        :rtype: list of dictionaries
 
         :Example:
 
         ::
 
-            >> cluster = InfluxDBClusterClient.from_DSN('influxdb://usr:pwd\
-@host1:8086,usr:pwd@host2:8086/db_name', timeout=5)
-            >> type(cluster)
-            <class 'influxdb.client.InfluxDBClusterClient'>
-            >> cluster.hosts
-            [('host1', 8086), ('host2', 8086)]
-            >> cluster._client
-             <influxdb.client.InfluxDBClient at 0x7feb438ec950>]
+            >> privileges = client.get_list_privileges('user1')
+            >> privileges
+            [{u'privilege': u'WRITE', u'database': u'db1'},
+             {u'privilege': u'ALL PRIVILEGES', u'database': u'db2'},
+             {u'privilege': u'NO PRIVILEGES', u'database': u'db3'}]
         """
-        init_args = parse_dsn(dsn)
-        init_args.update(**kwargs)
-        init_args['shuffle'] = shuffle
-        init_args['client_base_class'] = client_base_class
-        cluster_client = InfluxDBClusterClient(**init_args)
-        return cluster_client
+        text = "SHOW GRANTS FOR {0}".format(quote_ident(username))
+        return list(self.query(text).get_points())
 
-    def _update_client_host(self, host):
-        self._thread_local.host, self._thread_local.port = host
-        self._thread_local.baseurl = "{0}://{1}:{2}".format(
-            self._client._scheme,
-            self._client._host,
-            self._client._port
-        )
+    def send_packet(self, packet, protocol='json'):
+        """Send an UDP packet.
 
-    def _get_baseurl(self):
-        return self._thread_local.baseurl
+        :param packet: the packet to be sent
+        :type packet: (if protocol is 'json') dict
+                      (if protocol is 'line') sequence of line protocol strings
+        :param protocol: protocol of input data, either 'json' or 'line'
+        :type protocol: str
+        """
+        if protocol == 'json':
+            data = make_lines(packet).encode('utf-8')
+        elif protocol == 'line':
+            data = ('\n'.join(packet) + '\n').encode('utf-8')
+        self.udp_socket.sendto(data, (self._host, self._udp_port))
 
-    def _get_host(self):
-        return self._thread_local.host
-
-    def _make_func(self, orig_func):
-
-        @wraps(orig_func)
-        def func(*args, **kwargs):
-            now = time.time()
-            with self._hosts_lock:
-                if (self.bad_hosts
-                        and self._last_healing + self.healing_delay < now):
-                    h = self.bad_hosts.pop(0)
-                    self.hosts.append(h)
-                    self._last_healing = now
-
-                if self.shuffle:
-                    random.shuffle(self.hosts)
-
-                hosts = self.hosts + self.bad_hosts
-
-            for h in hosts:
-                bad_host = False
-                try:
-                    self._update_client_host(h)
-                    return orig_func(self._client, *args, **kwargs)
-                except InfluxDBClientError as e:
-                    # Errors caused by user's requests, re-raise
-                    raise e
-                except Exception as e:
-                    # Errors that might caused by server failure, try another
-                    bad_host = True
-                    with self._hosts_lock:
-                        if h in self.hosts:
-                            self.hosts.remove(h)
-                            self.bad_hosts.append(h)
-                        self._last_healing = now
-                finally:
-                    with self._hosts_lock:
-                        if not bad_host and h in self.bad_hosts:
-                            self.bad_hosts.remove(h)
-                            self.hosts.append(h)
-
-            raise InfluxDBServerError("InfluxDB: no viable server!")
-
-        return func
+    def close(self):
+        """Close http session."""
+        if isinstance(self._session, requests.Session):
+            self._session.close()
 
 
-def parse_dsn(dsn):
+def _parse_dsn(dsn):
+    """Parse data source name.
+
+    This is a helper function to split the data source name provided in
+    the from_dsn classmethod
+    """
     conn_params = urlparse(dsn)
     init_args = {}
     scheme_info = conn_params.scheme.split('+')
@@ -889,7 +901,7 @@ def parse_dsn(dsn):
         modifier, scheme = scheme_info
 
     if scheme != 'influxdb':
-        raise ValueError('Unknown scheme "{}".'.format(scheme))
+        raise ValueError('Unknown scheme "{0}".'.format(scheme))
 
     if modifier:
         if modifier == 'udp':
@@ -897,7 +909,7 @@ def parse_dsn(dsn):
         elif modifier == 'https':
             init_args['ssl'] = True
         else:
-            raise ValueError('Unknown modifier "{}".'.format(modifier))
+            raise ValueError('Unknown modifier "{0}".'.format(modifier))
 
     netlocs = conn_params.netloc.split(',')
 
@@ -915,7 +927,7 @@ def parse_dsn(dsn):
 
 
 def _parse_netloc(netloc):
-    info = urlparse("http://{}".format(netloc))
+    info = urlparse("http://{0}".format(netloc))
     return {'username': info.username or None,
             'password': info.password or None,
             'host': info.hostname or 'localhost',
