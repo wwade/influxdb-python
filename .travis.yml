@@ -1,23 +1,44 @@
 language: python
-env:
-    - TOX_ENV=py27
-    - TOX_ENV=py32
-    - TOX_ENV=py33
-    - TOX_ENV=py34
-    - TOX_ENV=pypy
-    - TOX_ENV=pypy3
-    - TOX_ENV=docs
-    - TOX_ENV=flake8
-    - TOX_ENV=coverage
+
+addons:
+  apt:
+    packages:
+    - wget
+
+matrix:
+  allow_failures:
+    - python: 3.4
+      env: TOX_ENV=docs
+  include:
+    - python: 2.7
+      env: TOX_ENV=py27
+    - python: 2.7
+      env: TOX_ENV=pep257
+    - python: pypy-5.3.1
+      env: TOX_ENV=pypy
+    - python: 3.4
+      env: TOX_ENV=py34
+    - python: 3.5
+      env: TOX_ENV=py35
+    - python: 3.6
+      env: TOX_ENV=py36
+    - python: 3.6
+      env: TOX_ENV=docs
+    - python: 3.6
+      env: TOX_ENV=flake8
+    - python: 3.6
+      env: TOX_ENV=coverage
+
 install:
     - pip install tox
+    - pip install setuptools==20.6.6
     - pip install coveralls
     - mkdir influxdb_install
-    - wget https://s3.amazonaws.com/influxdb/influxdb_0.9.4.1_amd64.deb
-    - dpkg -x influxdb_*_amd64.deb influxdb_install
+    - wget https://dl.influxdata.com/influxdb/releases/influxdb_1.2.4_amd64.deb
+    - dpkg -x influxdb*.deb influxdb_install
 script:
-    - export INFLUXDB_PYTHON_INFLUXD_PATH=$(pwd)/influxdb_install/opt/influxdb/versions/0.9.4.1/influxd
-    - travis_wait 30 tox -e $TOX_ENV
+    - export INFLUXDB_PYTHON_INFLUXD_PATH=$(pwd)/influxdb_install/usr/bin/influxd
+    - tox -e $TOX_ENV
 after_success:
     - if [ "$TOX_ENV" == "coverage" ] ; then coveralls; fi
 notifications:
@@ -26,8 +47,8 @@ notifications:
 sudo: false
 
 # Travis caching
-cache:
-  directories:
-    - $HOME/.cache/pip
-before_cache:
-  - rm -f $HOME/.cache/pip/log/debug.log
+cache: false
+#  directories:
+#    - $HOME/.cache/pip
+#before_cache:
+#  - rm -f $HOME/.cache/pip/log/debug.log
