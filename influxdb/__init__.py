@@ -7,15 +7,20 @@ from __future__ import print_function
 from __future__ import unicode_literals
 
 from .client import InfluxDBClient
-from .dataframe_client import DataFrameClient
 from .helper import SeriesHelper
+
+import os
+
+_DATAFRAME_CLIENT = "INFLUXDB_NO_DATAFRAME_CLIENT" not in os.environ
+if _DATAFRAME_CLIENT:
+   from .dataframe_client import DataFrameClient
 
 
 __all__ = [
     'InfluxDBClient',
-    'DataFrameClient',
     'SeriesHelper',
 ]
-
+if _DATAFRAME_CLIENT:
+   __all__.append( 'DataFrameClient' )
 
 __version__ = '5.0.0'

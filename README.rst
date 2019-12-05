@@ -94,7 +94,9 @@ Examples
 
 Here's a basic example (for more see the examples directory)::
 
-    $ python
+    # Since the DataFrame client is slow to import, if you only need InfluxDBClient,
+    # use INFLUXDB_NO_DATAFRAME_CLIENT.
+    $ INFLUXDB_NO_DATAFRAME_CLIENT=1 python
 
     >>> from influxdb import InfluxDBClient
 
